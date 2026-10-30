@@ -59,7 +59,7 @@ func main() {
 
 func printUsage() {
 	fmt.Fprintln(os.Stderr, `Usage:
-  mcp-telegram auth    --config config.yaml   Authenticate with Telegram (phone code or QR code)
+  mcp-telegram auth    --config config.yaml   Authenticate with Telegram (QR code or phone code)
   mcp-telegram dialogs --config config.yaml   List all dialogs (type, ref, title) to pick ACL entries
   mcp-telegram serve   --config config.yaml   Start MCP server (default)`)
 }
@@ -100,8 +100,6 @@ func runAuth() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	reader := bufio.NewReader(os.Stdin)
-
 	err = client.Run(ctx, func(ctx context.Context) error {
 		// Check if already authenticated — skip login flow if so.
 		status, err := client.Auth().Status(ctx)
@@ -120,24 +118,10 @@ func runAuth() {
 			auth:     client.Auth(),
 			qr:       client.QR(),
 			loggedIn: loggedIn,
-			reader:   reader,
+			reader:   bufio.NewReader(os.Stdin),
 			out:      os.Stdout,
 		}
-		fmt.Printf("Phone number (e.g. +79001234567), or %q to log in with a QR code: ", qrCommand)
-		phone, _ := reader.ReadString('\n')
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		phone = strings.TrimSpace(phone)
-		switch phone {
-		case "":
-			return fmt.Errorf("phone number is required")
-		case qrCommand:
-			err = l.withQR(ctx)
-		default:
-			err = l.withCode(ctx, phone)
-		}
-		if err != nil {
+		if err := l.start(ctx); err != nil {
 			return err
 		}
 
@@ -179,6 +163,50 @@ func (l login) readPasswordOrTerm() ([]byte, error) {
 		return l.readPassword()
 	}
 	return term.ReadPassword(int(syscall.Stdin))
+}
+
+// readLine reads one trimmed line. Ctrl-C cancels ctx but cannot interrupt the
+// blocking read, so ctx is checked after it.
+func (l login) readLine(ctx context.Context) (string, error) {
+	line, readErr := l.reader.ReadString('\n')
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	line = strings.TrimSpace(line)
+	if line == "" && readErr != nil {
+		return "", fmt.Errorf("read input: %w", readErr)
+	}
+	return line, nil
+}
+
+// start asks how to log in and runs the chosen method. QR comes first and is
+// the default: it needs no login code, which Telegram may not deliver to
+// third-party apps.
+func (l login) start(ctx context.Context) error {
+	fmt.Fprintln(l.out, "How do you want to log in?")
+	fmt.Fprintln(l.out, "  1) QR code: scan it in a Telegram app where you are already logged in (recommended)")
+	fmt.Fprintln(l.out, "  2) Phone number: enter a login code sent by Telegram")
+	for {
+		fmt.Fprint(l.out, "Choose 1 or 2 [1]: ")
+		choice, err := l.readLine(ctx)
+		if err != nil {
+			return err
+		}
+		switch choice {
+		case "", "1":
+			return l.withQR(ctx)
+		case "2":
+			fmt.Fprint(l.out, "Phone number (e.g. +79001234567): ")
+			phone, err := l.readLine(ctx)
+			if err != nil {
+				return err
+			}
+			if phone == "" {
+				return fmt.Errorf("phone number is required")
+			}
+			return l.withCode(ctx, phone)
+		}
+	}
 }
 
 // withCode logs in by phone code. It is used instead of auth.Flow so the

@@ -68,6 +68,86 @@ func testLogin(api *tg.Client, input string, loggedIn qrlogin.LoggedIn) login {
 	}
 }
 
+func TestStart_ChoosesMethod(t *testing.T) {
+	tests := []struct {
+		name       string
+		input      string
+		wantQR     bool
+		wantSignIn bool
+		wantErr    bool
+	}{
+		{name: "enter defaults to QR", input: "\n", wantQR: true},
+		{name: "QR", input: "1\n", wantQR: true},
+		{name: "unknown choice asks again", input: "+10000000000\n1\n", wantQR: true},
+		{name: "phone", input: "2\n+10000000000\n12345\n", wantSignIn: true},
+		{name: "phone required", input: "2\n\n", wantErr: true},
+		{name: "closed stdin starts nothing", input: "", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			loggedIn := make(chan struct{}, 1)
+			var exports int
+			var signedIn bool
+			api := tg.NewClient(invokerFunc(func(_ context.Context, input bin.Encoder, output bin.Decoder) error {
+				switch input.(type) {
+				case *tg.AuthExportLoginTokenRequest:
+					exports++
+					box := output.(*tg.AuthLoginTokenBox)
+					if exports == 1 {
+						box.LoginToken = &tg.AuthLoginToken{
+							Token:   []byte("token"),
+							Expires: int(time.Now().Add(time.Minute).Unix()),
+						}
+						loggedIn <- struct{}{} // The user scanned the code.
+						return nil
+					}
+					box.LoginToken = &tg.AuthLoginTokenSuccess{
+						Authorization: &tg.AuthAuthorization{User: &tg.User{}},
+					}
+				case *tg.AuthSendCodeRequest:
+					output.(*tg.AuthSentCodeBox).SentCode = &tg.AuthSentCode{
+						Type:          &tg.AuthSentCodeTypeApp{Length: 5},
+						PhoneCodeHash: "h1",
+					}
+				case *tg.AuthSignInRequest:
+					signedIn = true
+					output.(*tg.AuthAuthorizationBox).Authorization = &tg.AuthAuthorization{User: &tg.User{}}
+				default:
+					t.Fatalf("unexpected request %T", input)
+				}
+				return nil
+			}))
+			l := testLogin(api, tt.input, loggedIn)
+
+			err := l.start(context.Background())
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("start: err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got := exports > 0; got != tt.wantQR {
+				t.Errorf("QR login started = %v, want %v", got, tt.wantQR)
+			}
+			if signedIn != tt.wantSignIn {
+				t.Errorf("signed in by code = %v, want %v", signedIn, tt.wantSignIn)
+			}
+		})
+	}
+}
+
+func TestStart_StopsWhenCancelled(t *testing.T) {
+	api := tg.NewClient(invokerFunc(func(_ context.Context, input bin.Encoder, _ bin.Decoder) error {
+		t.Fatalf("unexpected request %T after cancel", input)
+		return nil
+	}))
+	// Ctrl-C followed by Enter: the empty line must not start QR login.
+	l := testLogin(api, "\n", nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := l.start(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+}
+
 func TestSignIn_ResendUsesNewCodeHash(t *testing.T) {
 	var resendHash, signInHashes []string
 	api := tg.NewClient(invokerFunc(func(_ context.Context, input bin.Encoder, output bin.Decoder) error {

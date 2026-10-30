@@ -132,7 +132,12 @@ This produces `mcp-telegram` (or `mcp-telegram.exe` on Windows) in the current d
 
 ### Authenticate
 
-Run the auth command once to create a session file. You will be prompted for your phone number, the login code, and (if enabled) your 2FA password. Instead of a phone number you can type `qr` to log in by scanning a QR code in a Telegram app where you are already logged in; while waiting for the code, `resend` requests it again via SMS or a call.
+Run the auth command once to create a session file. It asks how you want to log in:
+
+1. **QR code** (default) — scan the code from a Telegram app where you are already logged in: Settings → Devices → Link Desktop Device. No login code is needed.
+2. **Phone number** — enter the login code sent by Telegram. If it does not arrive, type `resend` to get it via SMS or a call, or `qr` to switch to the QR code.
+
+If your account has 2FA enabled, you will also be asked for the password.
 
 **macOS / Linux:**
 
